@@ -1,4 +1,11 @@
-import { matchFacebookProductMessage } from './facebook-message.js';
+import {
+  hasExplicitFacebookQuantity,
+  isFacebookAvailabilityInquiry,
+  isValidFacebookPhone,
+  matchFacebookProductMessage,
+  parseFacebookConfirmation,
+  parseFacebookQuantityReply,
+} from './facebook-message.js';
 
 describe('matchFacebookProductMessage', () => {
   const products = [
@@ -16,12 +23,59 @@ describe('matchFacebookProductMessage', () => {
       kind: 'match',
       items: [{ product: products[0], quantity: 1 }],
     });
-    expect(matchFacebookProductMessage('je veux une robe a main', products)).toEqual({
+    expect(
+      matchFacebookProductMessage('je veux une robe a main', products),
+    ).toEqual({
       kind: 'none',
     });
-    expect(matchFacebookProductMessage('Je veux un sac a main', products)).toEqual({
+    expect(
+      matchFacebookProductMessage('Je veux un sac a main', products),
+    ).toEqual({
       kind: 'match',
       items: [{ product: products[1], quantity: 1 }],
+    });
+  });
+
+  describe('Facebook conversation intent helpers', () => {
+    it('recognizes availability questions', () => {
+      expect(
+        isFacebookAvailabilityInquiry(
+          'La robe bleue est-elle encore disponible ?',
+        ),
+      ).toBe(true);
+      expect(
+        isFacebookAvailabilityInquiry('Avez-vous deux robes bleues ?'),
+      ).toBe(false);
+    });
+
+    it('parses a quantity-only answer without matching arbitrary numbers in text', () => {
+      expect(parseFacebookQuantityReply('Je voudrais 2, merci')).toBe(2);
+      expect(parseFacebookQuantityReply('deux')).toBe(2);
+      expect(parseFacebookQuantityReply('0')).toBeNull();
+      expect(parseFacebookQuantityReply('Je passerai demain à 2 heures')).toBe(
+        undefined,
+      );
+    });
+
+    it('recognizes explicit confirmation and cancellation replies', () => {
+      expect(parseFacebookConfirmation('Je confirme')).toBe(true);
+      expect(parseFacebookConfirmation('oui')).toBe(true);
+      expect(parseFacebookConfirmation('Oui, tout est correct')).toBe(true);
+      expect(parseFacebookConfirmation('non merci')).toBe(false);
+      expect(parseFacebookConfirmation('je vais confirmer demain')).toBe(
+        undefined,
+      );
+    });
+
+    it('validates phone numbers and detects an explicit product quantity', () => {
+      expect(isValidFacebookPhone('+261 34 12 345 67')).toBe(true);
+      expect(isValidFacebookPhone('appelez-moi demain')).toBe(false);
+      expect(
+        hasExplicitFacebookQuantity('Je commande 2 robe bleue', products[0]!),
+      ).toBe(true);
+      expect(hasExplicitFacebookQuantity('La robe bleue', products[0]!)).toBe(
+        false,
+      );
     });
   });
 
@@ -42,10 +96,7 @@ describe('matchFacebookProductMessage', () => {
 
   it('accepts French number words and aggregates repeated products', () => {
     expect(
-      matchFacebookProductMessage(
-        'deux robe azur et une robe bleue',
-        products,
-      ),
+      matchFacebookProductMessage('deux robe azur et une robe bleue', products),
     ).toEqual({
       kind: 'match',
       items: [{ product: products[0], quantity: 3 }],

@@ -9,8 +9,13 @@ import { timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OrdersService } from '../orders/orders.service.js';
 import {
+  hasExplicitFacebookQuantity,
+  isFacebookAvailabilityInquiry,
+  isValidFacebookPhone,
+  parseFacebookConfirmation,
   FacebookCatalogProduct,
   matchFacebookProductMessage,
+  parseFacebookQuantityReply,
 } from './facebook-message.js';
 import {
   FacebookGraphService,
@@ -183,7 +188,11 @@ export class FacebookService {
     return this.publishPagePost(message, image, true, product.id);
   }
 
-  verifyWebhook(mode: string | undefined, token: string | undefined, challenge: string | undefined) {
+  verifyWebhook(
+    mode: string | undefined,
+    token: string | undefined,
+    challenge: string | undefined,
+  ) {
     const verifyToken = process.env.FACEBOOK_VERIFY_TOKEN;
     if (!verifyToken) {
       throw new ServiceUnavailableException(
@@ -209,11 +218,24 @@ export class FacebookService {
 
     const products = await this.prisma.product.findMany({
       where: { deletedAt: null },
-      select: { id: true, nom: true, keywords: true },
+      select: {
+        id: true,
+        nom: true,
+        keywords: true,
+        description: true,
+        prix: true,
+        available: true,
+      },
     });
 
     for (const event of events) {
-      await this.processEvent(event, products);
+      await this.processEvent(
+        event,
+        products.map((product) => ({
+          ...product,
+          prix: product.prix.toString(),
+        })),
+      );
     }
   }
 
@@ -248,14 +270,8 @@ export class FacebookService {
           getNestedId(value, 'sender');
         const commentId =
           getString(value, 'comment_id') ?? getString(value, 'id');
-        const text =
-          getString(value, 'message') ?? getString(value, 'text');
-        if (
-          !senderId ||
-          !commentId ||
-          !text ||
-          senderId === pageId
-        ) {
+        const text = getString(value, 'message') ?? getString(value, 'text');
+        if (!senderId || !commentId || !text || senderId === pageId) {
           continue;
         }
 
@@ -298,6 +314,52 @@ export class FacebookService {
     products: FacebookCatalogProduct[],
   ) {
     const match = matchFacebookProductMessage(event.text, products);
+    const pending = await this.ordersService.getPendingFacebookOrder(
+      event.senderId,
+    );
+    if (pending) {
+      await this.processPendingOrder(event, pending, products);
+      return;
+    }
+
+    if (match.kind === 'match' && isFacebookAvailabilityInquiry(event.text)) {
+      const product = match.items[0]?.product;
+      if (!product) return;
+      const available = product.available ?? 0;
+      const replyText = [
+        available > 0
+          ? `${product.nom} est disponible (${available} en stock).`
+          : `${product.nom} n’est actuellement plus en stock.`,
+        product.description?.trim(),
+        product.prix ? `Prix : ${product.prix}` : undefined,
+        available > 0 ? 'Combien souhaitez-vous en commander ?' : undefined,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join('\n\n');
+      const result = await this.ordersService.recordFacebookOutcome({
+        channel: event.channel,
+        eventId: event.eventId,
+        senderId: event.senderId,
+        status: 'availability-inquiry',
+        replyText,
+      });
+      if (available > 0 && !result.replySent) {
+        await this.ordersService.savePendingFacebookOrder(
+          event.senderId,
+          product.id,
+          null,
+        );
+      }
+      if (result.replyText && !result.replySent) {
+        await this.sendReply(event, result.replyText);
+        await this.ordersService.markFacebookReplySent(
+          event.channel,
+          event.eventId,
+        );
+      }
+      return;
+    }
+
     if (match.kind === 'none') {
       const { greetingMessage } = await this.getPageSettings();
       const result = await this.ordersService.recordFacebookOutcome({
@@ -307,7 +369,9 @@ export class FacebookService {
         status: 'greeting',
         replyText: greetingMessage || null,
       });
-      if (!result.replyText || result.replySent) return;
+      if (!result.replyText || result.replySent) {
+        return;
+      }
       await this.sendReply(event, result.replyText);
       await this.ordersService.markFacebookReplySent(
         event.channel,
@@ -316,31 +380,197 @@ export class FacebookService {
       return;
     }
 
-    let result;
     if (match.kind === 'match') {
-      result = await this.ordersService.createFacebookReservation({
-        channel: event.channel,
-        eventId: event.eventId,
-        senderId: event.senderId,
-        items: match.items.map((item) => ({
-          productId: item.product.id,
-          quantity: item.quantity,
-        })),
-      });
-    } else {
-      const replyText =
-        match.kind === 'ambiguous'
-          ? 'Merci d’indiquer un seul produit et sa quantité par message. Pour plusieurs produits, envoyez un message distinct pour chacun.'
-          : 'La quantité doit être un nombre entier supérieur à zéro.';
-      result = await this.ordersService.recordFacebookOutcome({
-        channel: event.channel,
-        eventId: event.eventId,
-        senderId: event.senderId,
-        status: match.kind,
-        replyText,
-      });
+      if (match.items.length !== 1) {
+        await this.sendWorkflowReply(
+          event,
+          'ambiguous',
+          'Pour préparer votre commande, merci d’indiquer un seul article par message.',
+        );
+        return;
+      }
+
+      const item = match.items[0];
+      if (!item) return;
+      const product = item.product;
+      if ((product.available ?? 0) <= 0) {
+        await this.sendWorkflowReply(
+          event,
+          'out_of_stock',
+          `Nous sommes désolés, ${product.nom} n’est actuellement plus disponible.`,
+        );
+        return;
+      }
+
+      const quantity = hasExplicitFacebookQuantity(event.text, product)
+        ? item.quantity
+        : null;
+      await this.ordersService.savePendingFacebookOrder(
+        event.senderId,
+        product.id,
+        quantity,
+      );
+      await this.sendWorkflowReply(
+        event,
+        'order-details',
+        quantity === null
+          ? 'Avec plaisir. Combien d’articles souhaitez-vous commander ?'
+          : 'Merci. Pour préparer votre commande, veuillez indiquer votre numéro de téléphone.',
+      );
+      return;
     }
 
+    const replyText =
+      match.kind === 'ambiguous'
+        ? 'Pour préparer votre commande, merci d’indiquer un seul article par message.'
+        : 'La quantité doit être un nombre entier supérieur à zéro.';
+    await this.sendWorkflowReply(event, match.kind, replyText);
+  }
+
+  private async processPendingOrder(
+    event: IncomingFacebookEvent,
+    pending: {
+      productId: string;
+      quantity: number | null;
+      customerPhone: string | null;
+      deliveryAddress: string | null;
+    },
+    products: FacebookCatalogProduct[],
+  ) {
+    if (pending.quantity === null) {
+      const quantity = parseFacebookQuantityReply(event.text);
+      if (quantity === undefined || quantity === null) {
+        await this.sendWorkflowReply(
+          event,
+          'order-details',
+          'Merci d’indiquer la quantité souhaitée sous la forme d’un nombre entier positif.',
+        );
+        return;
+      }
+      const product = products.find(
+        (candidate) => candidate.id === pending.productId,
+      );
+      const available = product?.available ?? 0;
+      if (quantity > available) {
+        await this.sendWorkflowReply(
+          event,
+          'order-details',
+          `Nous avons actuellement ${available} article(s) disponible(s). Merci d’indiquer une quantité inférieure ou égale à ce stock.`,
+        );
+        return;
+      }
+      await this.ordersService.updatePendingFacebookOrder(event.senderId, {
+        quantity,
+      });
+      await this.sendWorkflowReply(
+        event,
+        'order-details',
+        'Merci. Pour préparer votre commande, veuillez indiquer votre numéro de téléphone.',
+      );
+      return;
+    }
+
+    if (!pending.customerPhone) {
+      if (!isValidFacebookPhone(event.text)) {
+        await this.sendWorkflowReply(
+          event,
+          'order-details',
+          'Le numéro indiqué ne semble pas valide. Merci d’envoyer un numéro de téléphone joignable, avec l’indicatif du pays si nécessaire.',
+        );
+        return;
+      }
+      await this.ordersService.updatePendingFacebookOrder(event.senderId, {
+        customerPhone: event.text.trim(),
+      });
+      await this.sendWorkflowReply(
+        event,
+        'order-details',
+        'Merci. Veuillez maintenant indiquer l’adresse complète de livraison.',
+      );
+      return;
+    }
+
+    if (!pending.deliveryAddress) {
+      const address = event.text.trim();
+      if (address.length < 5) {
+        await this.sendWorkflowReply(
+          event,
+          'order-details',
+          'Merci d’indiquer une adresse de livraison suffisamment détaillée.',
+        );
+        return;
+      }
+      await this.ordersService.updatePendingFacebookOrder(event.senderId, {
+        deliveryAddress: address,
+      });
+      const product = products.find(
+        (candidate) => candidate.id === pending.productId,
+      );
+      const recap = [
+        'Voici le récapitulatif de votre commande :',
+        `Article : ${product?.nom ?? 'Article sélectionné'}`,
+        `Quantité : ${pending.quantity}`,
+        ...(product?.prix ? [`Prix unitaire : ${product.prix}`] : []),
+        `Téléphone : ${pending.customerPhone}`,
+        `Adresse de livraison : ${address}`,
+        '',
+        'Merci de vérifier ces informations. Répondez « CONFIRMER » pour valider la commande ou « ANNULER » pour l’abandonner.',
+      ].join('\n');
+      await this.sendWorkflowReply(event, 'order-confirmation', recap);
+      return;
+    }
+
+    const confirmation = parseFacebookConfirmation(event.text);
+    if (confirmation === undefined) {
+      await this.sendWorkflowReply(
+        event,
+        'order-confirmation',
+        'Pour finaliser votre commande, répondez « CONFIRMER ». Pour l’abandonner, répondez « ANNULER ».',
+      );
+      return;
+    }
+    if (!confirmation) {
+      await this.ordersService.clearPendingFacebookOrder(event.senderId);
+      await this.sendWorkflowReply(
+        event,
+        'order-cancelled',
+        'Votre demande a été annulée. Aucune commande n’a été enregistrée.',
+      );
+      return;
+    }
+
+    const result = await this.ordersService.createFacebookReservation({
+      channel: event.channel,
+      eventId: event.eventId,
+      senderId: event.senderId,
+      customerPhone: pending.customerPhone,
+      deliveryAddress: pending.deliveryAddress,
+      items: [{ productId: pending.productId, quantity: pending.quantity }],
+    });
+    if (result.status === 'reserved' || result.status === 'out_of_stock') {
+      await this.ordersService.clearPendingFacebookOrder(event.senderId);
+    }
+    if (result.replyText && !result.replySent) {
+      await this.sendReply(event, result.replyText);
+      await this.ordersService.markFacebookReplySent(
+        event.channel,
+        event.eventId,
+      );
+    }
+  }
+
+  private async sendWorkflowReply(
+    event: IncomingFacebookEvent,
+    status: string,
+    replyText: string,
+  ) {
+    const result = await this.ordersService.recordFacebookOutcome({
+      channel: event.channel,
+      eventId: event.eventId,
+      senderId: event.senderId,
+      status,
+      replyText,
+    });
     if (!result.replyText || result.replySent) return;
     await this.sendReply(event, result.replyText);
     await this.ordersService.markFacebookReplySent(
@@ -351,10 +581,7 @@ export class FacebookService {
 
   private async sendReply(event: IncomingFacebookEvent, replyText: string) {
     if (event.channel === 'comment' && event.commentId) {
-      await this.graph.sendCommentPrivateReply(
-        event.commentId,
-        replyText,
-      );
+      await this.graph.sendCommentPrivateReply(event.commentId, replyText);
     } else {
       await this.graph.sendMessengerReply(event.senderId, replyText);
     }

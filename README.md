@@ -48,23 +48,33 @@ variables SMTP décrites dans `.env.example` pour permettre l’envoi des codes.
 ## Facebook / Meta
 
 La rubrique `/facebook` du frontend permet aux administrateurs de configurer le
-message d’accueil. Les publications se font depuis `/produits`. Les messages et
-commentaires reconnus par mots-clés créent une commande pour un seul produit et
-réservent le stock. Si un message demande plusieurs produits, le client est
-invité à envoyer une demande distincte pour chaque produit. Aucun paiement n’est
-effectué automatiquement.
+message d’accueil. Les publications se font depuis `/produits`. Les demandes
+reconnues par mots-clés démarrent un parcours pour un seul produit. Si un message
+demande plusieurs produits, le client est invité à envoyer une demande distincte
+pour chaque produit. Aucun paiement n’est effectué automatiquement.
 
-Les commandes conservent le nom, le téléphone et l’adresse de livraison du
+Une question sur la disponibilité d’un produit reçoit d’abord une réponse avec
+sa description, son prix et le stock disponible, puis demande la quantité
+souhaitée. Avant de créer une commande, le bot recueille le téléphone et
+l’adresse de livraison, présente un récapitulatif (article, quantité, prix
+unitaire et coordonnées), puis attend une confirmation explicite. Aucune
+commande ni réservation de stock n’est créée avant cette confirmation.
+Les publications produits incluent leur description et leur prix dans la
+légende.
+
+Les commandes conservent le téléphone et l’adresse de livraison fournis par le
 client, ainsi que la date/heure à laquelle elles sont marquées comme livrées.
-Les coordonnées reçues via Facebook doivent être complétées manuellement : les
-webhooks de commentaires et Messenger ne fournissent pas automatiquement ces
-informations de livraison.
+Les webhooks Facebook ne fournissent pas automatiquement ces informations :
+le bot les demande dans la conversation avant de créer la commande.
 
 Pour activer l’intégration :
 
 1. Configurez une application Meta avec les produits Messenger et Webhooks, puis
-   liez-y votre Page et accordez les permissions requises par Meta.
-2. Dans Graph API Explorer, récupérez l’ID de la Page et son jeton d’accès Page.
+   liez-y votre Page et accordez les permissions requises par Meta. Pour publier
+   des publications et des photos sur la Page, utilisez `pages_manage_posts`.
+2. Dans Graph API Explorer, générez un jeton utilisateur avec `pages_show_list`
+   et `pages_manage_posts`, puis récupérez l’ID de la Page et son jeton d’accès
+   Page (par exemple via `/me/accounts`).
 3. Renseignez côté serveur `FACEBOOK_APP_SECRET`, `FACEBOOK_VERIFY_TOKEN`,
    `FACEBOOK_PAGE_ID`, `FACEBOOK_PAGE_ACCESS_TOKEN` et
    `FACEBOOK_GRAPH_API_VERSION`.
@@ -77,6 +87,11 @@ dans la configuration du webhook Meta. Gardez tous les jetons et secrets dans
 les variables d’environnement du serveur ; ne les publiez pas et ne les mettez
 pas dans le frontend. Meta peut demander une revue de l’application et un accès
 avancé pour les utilisateurs hors des rôles de test.
+
+Après avoir modifié les permissions de l’application, générez un nouveau jeton
+d’accès Page et remplacez `FACEBOOK_PAGE_ACCESS_TOKEN`. Les autorisations
+nécessaires aux webhooks et à Messenger sont distinctes ; vérifiez-les selon les
+fonctionnalités utilisées dans la documentation Meta.
 
 Les publications organiques peuvent inclure un lien `m.me` vers la conversation
 Messenger de la Page. Elles ne prennent pas en charge le bouton natif

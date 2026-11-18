@@ -20,6 +20,10 @@ describe('FacebookService', () => {
     createFacebookReservation: vi.fn(),
     recordFacebookOutcome: vi.fn(),
     markFacebookReplySent: vi.fn(),
+    savePendingFacebookOrder: vi.fn(),
+    getPendingFacebookOrder: vi.fn(),
+    updatePendingFacebookOrder: vi.fn(),
+    clearPendingFacebookOrder: vi.fn(),
   };
   const graph = {
     ensureConfigured: vi.fn(),
@@ -36,8 +40,22 @@ describe('FacebookService', () => {
     graph.getMessengerLink.mockReturnValue('https://m.me/page-1');
     graph.publishPagePost.mockResolvedValue('published-1');
     prisma.product.findMany.mockResolvedValue([
-      { id: 'product-1', nom: 'Robe bleue', keywords: ['robe azur'] },
-      { id: 'product-2', nom: 'Sac rouge', keywords: ['sac'] },
+      {
+        id: 'product-1',
+        nom: 'Robe bleue',
+        keywords: ['robe azur'],
+        description: 'Robe légère en coton',
+        prix: '25 000 Ar',
+        available: 4,
+      },
+      {
+        id: 'product-2',
+        nom: 'Sac rouge',
+        keywords: ['sac'],
+        description: 'Sac en cuir',
+        prix: '50 000 Ar',
+        available: 2,
+      },
     ]);
     prisma.facebookPageSettings.upsert.mockResolvedValue({
       greetingMessage: 'Bonjour, nous revenons vers vous rapidement.',
@@ -57,6 +75,7 @@ describe('FacebookService', () => {
       replySent: false,
       duplicate: false,
     });
+    ordersService.getPendingFacebookOrder.mockReset().mockResolvedValue(null);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -78,7 +97,16 @@ describe('FacebookService', () => {
     }
   });
 
-  it('reserves an exact product from a post or Live comment and replies privately', async () => {
+  it('asks for contact details instead of reserving an item from a comment', async () => {
+    ordersService.recordFacebookOutcome.mockImplementationOnce(
+      async (input: { replyText: string }) => ({
+        status: 'order-details',
+        orderId: null,
+        replyText: input.replyText,
+        replySent: false,
+        duplicate: false,
+      }),
+    );
     await service.handleWebhook({
       object: 'page',
       entry: [
@@ -100,15 +128,15 @@ describe('FacebookService', () => {
       ],
     });
 
-    expect(ordersService.createFacebookReservation).toHaveBeenCalledWith({
-      channel: 'comment',
-      eventId: 'comment-1',
-      senderId: 'customer-1',
-      items: [{ productId: 'product-1', quantity: 2 }],
-    });
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+    expect(ordersService.savePendingFacebookOrder).toHaveBeenCalledWith(
+      'customer-1',
+      'product-1',
+      2,
+    );
     expect(graph.sendCommentPrivateReply).toHaveBeenCalledWith(
       'comment-1',
-      'Réservation confirmée',
+      'Merci. Pour préparer votre commande, veuillez indiquer votre numéro de téléphone.',
     );
     expect(graph.sendMessengerReply).not.toHaveBeenCalled();
     expect(ordersService.markFacebookReplySent).toHaveBeenCalledWith(
@@ -193,6 +221,172 @@ describe('FacebookService', () => {
     );
   });
 
+  it('answers availability questions before asking the customer for a quantity', async () => {
+    const replyText =
+      'Robe bleue est disponible (4 en stock).\n\nRobe légère en coton.\n\nPrix : 25 000 Ar\n\nCombien souhaitez-vous en commander ?';
+    ordersService.recordFacebookOutcome.mockResolvedValueOnce({
+      status: 'availability-inquiry',
+      orderId: null,
+      replyText,
+      replySent: false,
+      duplicate: false,
+    });
+    await service.handleWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              message: {
+                mid: 'availability-1',
+                text: 'La robe bleue est-elle encore disponible ?',
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+    expect(ordersService.savePendingFacebookOrder).toHaveBeenCalledWith(
+      'customer-1',
+      'product-1',
+      null,
+    );
+    expect(graph.sendMessengerReply).toHaveBeenCalledWith(
+      'customer-1',
+      replyText,
+    );
+  });
+
+  it('saves the requested quantity and asks for a phone number', async () => {
+    ordersService.getPendingFacebookOrder.mockResolvedValue({
+      productId: 'product-1',
+      quantity: null,
+      customerPhone: null,
+      deliveryAddress: null,
+    });
+    ordersService.recordFacebookOutcome.mockImplementationOnce(
+      async (input: { replyText: string }) => ({
+        status: 'order-details',
+        orderId: null,
+        replyText: input.replyText,
+        replySent: false,
+        duplicate: false,
+      }),
+    );
+    await service.handleWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              message: { mid: 'quantity-1', text: 'Je voudrais 2, merci' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+    expect(ordersService.updatePendingFacebookOrder).toHaveBeenCalledWith(
+      'customer-1',
+      { quantity: 2 },
+    );
+    expect(graph.sendMessengerReply).toHaveBeenCalledWith(
+      'customer-1',
+      'Merci. Pour préparer votre commande, veuillez indiquer votre numéro de téléphone.',
+    );
+  });
+
+  it('creates an order only after contact details are reviewed and confirmed', async () => {
+    ordersService.getPendingFacebookOrder
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        productId: 'product-1',
+        quantity: 2,
+        customerPhone: null,
+        deliveryAddress: null,
+      })
+      .mockResolvedValueOnce({
+        productId: 'product-1',
+        quantity: 2,
+        customerPhone: '+261 34 12 345 67',
+        deliveryAddress: null,
+      })
+      .mockResolvedValueOnce({
+        productId: 'product-1',
+        quantity: 2,
+        customerPhone: '+261 34 12 345 67',
+        deliveryAddress: 'Lot II A 25, Analamahitsy, Antananarivo',
+      });
+    ordersService.recordFacebookOutcome.mockImplementation(
+      async (input: { replyText: string }) => ({
+        status: 'order-details',
+        orderId: null,
+        replyText: input.replyText,
+        replySent: false,
+        duplicate: false,
+      }),
+    );
+    const sendMessage = async (mid: string, text: string) => {
+      await service.handleWebhook({
+        object: 'page',
+        entry: [
+          {
+            id: 'page-1',
+            messaging: [
+              {
+                sender: { id: 'customer-1' },
+                recipient: { id: 'page-1' },
+                message: { mid, text },
+              },
+            ],
+          },
+        ],
+      });
+    };
+
+    await sendMessage('start-order', '2 robe bleue');
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+
+    await sendMessage('phone', '+261 34 12 345 67');
+    expect(ordersService.updatePendingFacebookOrder).toHaveBeenCalledWith(
+      'customer-1',
+      { customerPhone: '+261 34 12 345 67' },
+    );
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+
+    await sendMessage('address', 'Lot II A 25, Analamahitsy, Antananarivo');
+    expect(graph.sendMessengerReply).toHaveBeenLastCalledWith(
+      'customer-1',
+      expect.stringContaining(
+        'Répondez « CONFIRMER » pour valider la commande',
+      ),
+    );
+    expect(graph.sendMessengerReply).toHaveBeenLastCalledWith(
+      'customer-1',
+      expect.stringContaining('Téléphone : +261 34 12 345 67'),
+    );
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+
+    await sendMessage('confirm', 'Je confirme');
+    expect(ordersService.createFacebookReservation).toHaveBeenCalledWith({
+      channel: 'messenger',
+      eventId: 'confirm',
+      senderId: 'customer-1',
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy, Antananarivo',
+      items: [{ productId: 'product-1', quantity: 2 }],
+    });
+  });
+
   it('adds the Messenger link to a post when requested', async () => {
     await service.publishPagePost('Nouvelle collection', undefined, true);
 
@@ -270,7 +464,16 @@ describe('FacebookService', () => {
     expect(graph.publishPagePost).not.toHaveBeenCalled();
   });
 
-  it('reserves a Messenger request and skips echoes and other pages', async () => {
+  it('starts the confirmation flow for a Messenger order and skips echoes and other pages', async () => {
+    ordersService.recordFacebookOutcome.mockImplementationOnce(
+      async (input: { replyText: string }) => ({
+        status: 'order-details',
+        orderId: null,
+        replyText: input.replyText,
+        replySent: false,
+        duplicate: false,
+      }),
+    );
     await service.handleWebhook({
       object: 'page',
       entry: [
@@ -308,16 +511,15 @@ describe('FacebookService', () => {
       ],
     });
 
-    expect(ordersService.createFacebookReservation).toHaveBeenCalledTimes(1);
-    expect(ordersService.createFacebookReservation).toHaveBeenCalledWith({
-      channel: 'messenger',
-      eventId: 'message-1',
-      senderId: 'customer-1',
-      items: [{ productId: 'product-1', quantity: 2 }],
-    });
+    expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
+    expect(ordersService.savePendingFacebookOrder).toHaveBeenCalledWith(
+      'customer-1',
+      'product-1',
+      2,
+    );
     expect(graph.sendMessengerReply).toHaveBeenCalledWith(
       'customer-1',
-      'Réservation confirmée',
+      'Merci. Pour préparer votre commande, veuillez indiquer votre numéro de téléphone.',
     );
   });
 
@@ -343,14 +545,16 @@ describe('FacebookService', () => {
     });
 
     expect(ordersService.createFacebookReservation).not.toHaveBeenCalled();
-    expect(ordersService.recordFacebookOutcome).toHaveBeenCalledWith({
-      channel: 'messenger',
-      eventId: 'message-multiple-products',
-      senderId: 'customer-1',
-      status: 'ambiguous',
-      replyText:
-        'Merci d’indiquer un seul produit et sa quantité par message. Pour plusieurs produits, envoyez un message distinct pour chacun.',
-    });
+    expect(ordersService.recordFacebookOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'messenger',
+        eventId: 'message-multiple-products',
+        senderId: 'customer-1',
+        status: 'ambiguous',
+        replyText:
+          'Pour préparer votre commande, merci d’indiquer un seul article par message.',
+      }),
+    );
     expect(graph.sendMessengerReply).toHaveBeenCalledWith(
       'customer-1',
       'Nom ambigu',

@@ -6,10 +6,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import {
-  CreateOrderDto,
-  CreateOrderItemDto,
-} from './dto/create-order.dto.js';
+import { CreateOrderDto, CreateOrderItemDto } from './dto/create-order.dto.js';
 import { UpdateOrderDto } from './dto/update-order.dto.js';
 
 type OrderStatus = 'reserved' | 'payed' | 'canceled';
@@ -21,6 +18,8 @@ export interface FacebookOrderEventInput {
   channel: 'comment' | 'messenger';
   eventId: string;
   senderId: string;
+  customerPhone: string;
+  deliveryAddress: string;
   items: Array<{
     productId: string;
     productColorId?: string;
@@ -70,7 +69,9 @@ export class OrdersService {
 
     const status = createOrderDto.status ?? 'reserved';
     if (createOrderDto.delivered && status === 'canceled') {
-      throw new BadRequestException('A canceled order cannot be marked delivered');
+      throw new BadRequestException(
+        'A canceled order cannot be marked delivered',
+      );
     }
     return this.prisma.$transaction(
       async (tx) => {
@@ -95,13 +96,25 @@ export class OrdersService {
             id: randomUUID(),
             status,
             ...(createOrderDto.customer_name !== undefined
-              ? { customerName: this.normalizeCustomerValue(createOrderDto.customer_name) }
+              ? {
+                  customerName: this.normalizeCustomerValue(
+                    createOrderDto.customer_name,
+                  ),
+                }
               : {}),
             ...(createOrderDto.delivery_address !== undefined
-              ? { deliveryAddress: this.normalizeCustomerValue(createOrderDto.delivery_address) }
+              ? {
+                  deliveryAddress: this.normalizeCustomerValue(
+                    createOrderDto.delivery_address,
+                  ),
+                }
               : {}),
             ...(createOrderDto.customer_phone !== undefined
-              ? { customerPhone: this.normalizeCustomerValue(createOrderDto.customer_phone) }
+              ? {
+                  customerPhone: this.normalizeCustomerValue(
+                    createOrderDto.customer_phone,
+                  ),
+                }
               : {}),
             ...(createOrderDto.delivered ? { deliveredAt: new Date() } : {}),
             items: {
@@ -125,6 +138,11 @@ export class OrdersService {
   async createFacebookReservation(
     input: FacebookOrderEventInput,
   ): Promise<FacebookOrderEventResult> {
+    if (!input.customerPhone.trim() || !input.deliveryAddress.trim()) {
+      throw new BadRequestException(
+        'Facebook reservations require a customer phone and delivery address',
+      );
+    }
     if (input.items.length !== 1) {
       throw new BadRequestException(
         'A Facebook order must contain exactly one product',
@@ -197,6 +215,8 @@ export class OrdersService {
             data: {
               id: randomUUID(),
               status: 'reserved',
+              customerPhone: input.customerPhone.trim(),
+              deliveryAddress: input.deliveryAddress.trim(),
               facebookUserId: input.senderId,
               facebookChannel: input.channel,
               facebookEventId: `${input.channel}:${input.eventId}`,
@@ -218,12 +238,14 @@ export class OrdersService {
             },
           });
           if (order.items.length !== 1) {
-            throw new Error('Facebook reservation did not create one order item');
+            throw new Error(
+              'Facebook reservation did not create one order item',
+            );
           }
           const orderLine = order.items[0];
           const replyText = orderLine
-            ? `Votre réservation est confirmée : ${orderLine.product.nom}${orderLine.productColor ? ` (${orderLine.productColor.name})` : ''} x ${orderLine.quantity} (commande ${order.id}).`
-            : `Votre réservation est confirmée (commande ${order.id}).`;
+            ? `Merci pour votre confirmation. Votre commande de ${orderLine.product.nom}${orderLine.productColor ? ` (${orderLine.productColor.name})` : ''} × ${orderLine.quantity} est bien enregistrée.`
+            : 'Merci pour votre confirmation. Votre commande est bien enregistrée.';
           const event = await tx.facebookWebhookEvent.update({
             where: {
               channel_eventId: {
@@ -257,9 +279,9 @@ export class OrdersService {
   async savePendingFacebookOrder(
     senderId: string,
     productId: string,
-    quantity: number,
+    quantity: number | null,
   ) {
-    this.validateQuantity(quantity, true);
+    if (quantity !== null) this.validateQuantity(quantity, true);
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
     return this.prisma.facebookPendingOrder.upsert({
       where: { senderId },
@@ -271,6 +293,22 @@ export class OrdersService {
         expiresAt,
       },
       update: { productId, quantity, expiresAt },
+    });
+  }
+
+  updatePendingFacebookOrder(
+    senderId: string,
+    data: {
+      quantity?: number;
+      customerPhone?: string;
+      deliveryAddress?: string;
+    },
+  ) {
+    if (data.quantity !== undefined) this.validateQuantity(data.quantity, true);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    return this.prisma.facebookPendingOrder.update({
+      where: { senderId },
+      data: { ...data, expiresAt },
     });
   }
 
@@ -320,7 +358,10 @@ export class OrdersService {
     }
   }
 
-  async markFacebookReplySent(channel: 'comment' | 'messenger', eventId: string) {
+  async markFacebookReplySent(
+    channel: 'comment' | 'messenger',
+    eventId: string,
+  ) {
     return this.prisma.facebookWebhookEvent.update({
       where: { channel_eventId: { channel, eventId } },
       data: { replySent: true },
@@ -384,27 +425,25 @@ export class OrdersService {
           updateOrderDto.quantity !== undefined;
         const itemsChanged =
           updateOrderDto.items !== undefined || legacyItemsChanged;
-        const nextItems = updateOrderDto.items !== undefined
-          ? this.resolveItems(updateOrderDto.items)
-          : legacyItemsChanged
-            ? this.resolveItems(
-                undefined,
-                updateOrderDto.product_id ?? currentOrder.items[0].productId,
-                updateOrderDto.quantity ?? currentOrder.items[0].quantity,
-                updateOrderDto.product_color_id,
-              )
-            : currentOrder.items.map((item) => ({
-                product_id: item.productId,
-                ...(item.productColorId
-                  ? { product_color_id: item.productColorId }
-                  : {}),
-                quantity: item.quantity,
-              }));
+        const nextItems =
+          updateOrderDto.items !== undefined
+            ? this.resolveItems(updateOrderDto.items)
+            : legacyItemsChanged
+              ? this.resolveItems(
+                  undefined,
+                  updateOrderDto.product_id ?? currentOrder.items[0].productId,
+                  updateOrderDto.quantity ?? currentOrder.items[0].quantity,
+                  updateOrderDto.product_color_id,
+                )
+              : currentOrder.items.map((item) => ({
+                  product_id: item.productId,
+                  ...(item.productColorId
+                    ? { product_color_id: item.productColorId }
+                    : {}),
+                  quantity: item.quantity,
+                }));
         const nextStatus = updateOrderDto.status ?? currentOrder.status;
-        if (
-          updateOrderDto.delivered === true &&
-          nextStatus === 'canceled'
-        ) {
+        if (updateOrderDto.delivered === true && nextStatus === 'canceled') {
           throw new BadRequestException(
             'A canceled order cannot be marked delivered',
           );
@@ -630,9 +669,7 @@ export class OrdersService {
         ? [
             {
               product_id: productId,
-              ...(productColorId
-                ? { product_color_id: productColorId }
-                : {}),
+              ...(productColorId ? { product_color_id: productColorId } : {}),
               quantity: quantity ?? 0,
             },
           ]
@@ -667,9 +704,7 @@ export class OrdersService {
       seenProductIds.add(item.product_id);
     }
     if (normalizedItems.length > 1) {
-      throw new BadRequestException(
-        'An order can contain only one product',
-      );
+      throw new BadRequestException('An order can contain only one product');
     }
     if (!items && !productId) {
       throw new BadRequestException('At least one order item is required');

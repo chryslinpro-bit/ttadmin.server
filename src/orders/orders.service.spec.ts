@@ -31,6 +31,12 @@ describe('OrdersService', () => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    facebookPendingOrder: {
+      upsert: vi.fn(),
+      update: vi.fn(),
+      findUnique: vi.fn(),
+      deleteMany: vi.fn(),
+    },
   };
 
   beforeEach(async () => {
@@ -112,7 +118,8 @@ describe('OrdersService', () => {
     transaction.facebookWebhookEvent.update.mockResolvedValue({
       status: 'reserved',
       orderId: 'order-facebook',
-      replyText: 'Votre réservation est confirmée.',
+      replyText:
+        'Merci pour votre confirmation. Votre commande est bien enregistrée.',
       replySent: false,
     });
 
@@ -120,16 +127,20 @@ describe('OrdersService', () => {
       channel: 'messenger',
       eventId: 'message-1',
       senderId: 'sender-1',
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
       items: [{ productId: 'product-1', quantity: 2 }],
     });
 
     expect(result).toEqual({
       status: 'reserved',
       orderId: 'order-facebook',
-      replyText: 'Votre réservation est confirmée.',
+      replyText:
+        'Merci pour votre confirmation. Votre commande est bien enregistrée.',
       replySent: false,
       duplicate: false,
     });
+    expect(result.replyText).not.toContain('order-facebook');
     expect(transaction.product.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -145,6 +156,8 @@ describe('OrdersService', () => {
           facebookUserId: 'sender-1',
           facebookChannel: 'messenger',
           facebookEventId: 'messenger:message-1',
+          customerPhone: '+261 34 12 345 67',
+          deliveryAddress: 'Lot II A 25, Analamahitsy',
           status: 'reserved',
           items: {
             create: [
@@ -154,6 +167,37 @@ describe('OrdersService', () => {
         }),
       }),
     );
+  });
+
+  it('updates the Facebook pending order as customer details are collected', async () => {
+    prisma.facebookPendingOrder.update.mockResolvedValue({
+      senderId: 'sender-1',
+      quantity: 2,
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
+    });
+
+    await service.updatePendingFacebookOrder('sender-1', {
+      customerPhone: '+261 34 12 345 67',
+    });
+    await service.updatePendingFacebookOrder('sender-1', {
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
+    });
+
+    expect(prisma.facebookPendingOrder.update).toHaveBeenNthCalledWith(1, {
+      where: { senderId: 'sender-1' },
+      data: expect.objectContaining({
+        customerPhone: '+261 34 12 345 67',
+        expiresAt: expect.any(Date),
+      }),
+    });
+    expect(prisma.facebookPendingOrder.update).toHaveBeenNthCalledWith(2, {
+      where: { senderId: 'sender-1' },
+      data: expect.objectContaining({
+        deliveryAddress: 'Lot II A 25, Analamahitsy',
+        expiresAt: expect.any(Date),
+      }),
+    });
   });
 
   it('records an out-of-stock Facebook event without creating an order', async () => {
@@ -173,6 +217,8 @@ describe('OrdersService', () => {
       channel: 'comment',
       eventId: 'comment-1',
       senderId: 'sender-1',
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
       items: [{ productId: 'product-1', quantity: 2 }],
     });
 
@@ -186,6 +232,8 @@ describe('OrdersService', () => {
         channel: 'messenger',
         eventId: 'message-multiple-products',
         senderId: 'sender-1',
+        customerPhone: '+261 34 12 345 67',
+        deliveryAddress: 'Lot II A 25, Analamahitsy',
         items: [
           { productId: 'product-1', quantity: 2 },
           { productId: 'product-2', quantity: 1 },
@@ -210,6 +258,8 @@ describe('OrdersService', () => {
       channel: 'messenger',
       eventId: 'message-1',
       senderId: 'sender-1',
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
       items: [{ productId: 'product-1', quantity: 1 }],
     });
 

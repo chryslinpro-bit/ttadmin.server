@@ -2,6 +2,9 @@ export interface FacebookCatalogProduct {
   id: string;
   nom: string;
   keywords: string[];
+  description?: string;
+  prix?: string;
+  available?: number;
 }
 
 export interface ParsedFacebookOrderItem {
@@ -36,12 +39,145 @@ const WRITTEN_NUMBERS: Record<string, number> = {
   dix: 10,
 };
 
-function tokenize(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLocaleLowerCase('fr-FR')
-    .match(/[\p{L}\p{N}]+/gu) ?? [];
+function tokenize(value: string): string[] {
+  return (
+    value
+      .normalize('NFD')
+      .replace(/\p{Diacritic}/gu, '')
+      .toLocaleLowerCase('fr-FR')
+      .match(/[\p{L}\p{N}]+/gu) ?? []
+  );
+}
+
+export function isFacebookAvailabilityInquiry(message: string) {
+  const tokens = tokenize(message);
+  return (
+    tokens.some((token) =>
+      ['disponible', 'disponibles', 'dispo', 'reste', 'restant'].includes(
+        token,
+      ),
+    ) ||
+    (tokens.includes('en') && tokens.includes('stock'))
+  );
+}
+
+export function parseFacebookQuantityReply(message: string) {
+  const tokens = tokenize(message);
+  const quantityWords = new Set([...Object.keys(WRITTEN_NUMBERS), '0']);
+  const quantityIndexes = tokens.flatMap((token, index) =>
+    /^\d+$/.test(token) || quantityWords.has(token) ? [index] : [],
+  );
+  if (quantityIndexes.length !== 1) return undefined;
+
+  const quantityIndex = quantityIndexes[0];
+  if (quantityIndex === undefined) return undefined;
+  const allowedContext = new Set([
+    'je',
+    'veux',
+    'vais',
+    'voudrais',
+    'aimerais',
+    'prends',
+    'prendrai',
+    'commande',
+    'commander',
+    'en',
+    'prendre',
+    'oui',
+    'svp',
+    'stp',
+    'merci',
+    's',
+    'il',
+    'vous',
+    'plait',
+    'quantite',
+    'quantites',
+    'piece',
+    'pieces',
+    'article',
+    'articles',
+    'exemplaire',
+    'exemplaires',
+  ]);
+  if (
+    tokens.some(
+      (token, index) => index !== quantityIndex && !allowedContext.has(token),
+    )
+  ) {
+    return undefined;
+  }
+
+  const quantity = quantityAt(tokens, quantityIndex);
+  return quantity !== undefined &&
+    Number.isSafeInteger(quantity) &&
+    quantity > 0
+    ? quantity
+    : null;
+}
+
+export function hasExplicitFacebookQuantity(
+  message: string,
+  product: FacebookCatalogProduct,
+) {
+  const tokens = tokenize(message);
+  const aliases = new Set([product.nom, ...product.keywords]);
+  for (const alias of aliases) {
+    const phrase = tokenize(alias);
+    if (phrase.length === 0) continue;
+
+    for (let start = 0; start <= tokens.length - phrase.length; start += 1) {
+      if (!phrase.every((word, index) => tokens[start + index] === word)) {
+        continue;
+      }
+      const end = start + phrase.length;
+      if (
+        quantityAt(tokens, start - 1) !== undefined ||
+        (tokens[start - 1] === 'x' &&
+          quantityAt(tokens, start - 2) !== undefined) ||
+        quantityAt(tokens, end) !== undefined ||
+        (tokens[end] === 'x' && quantityAt(tokens, end + 1) !== undefined)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function parseFacebookConfirmation(message: string) {
+  const tokens = tokenize(message);
+  const affirmative = new Set([
+    'oui',
+    'je',
+    'confirme',
+    'confirmer',
+    'confirmez',
+    'daccord',
+    'ok',
+    'okay',
+    'valide',
+    'valider',
+    'c',
+    'est',
+    'bon',
+    'tout',
+    'correct',
+    'exact',
+  ]);
+  const negative = new Set(['non', 'annule', 'annuler', 'annulation', 'merci']);
+  if (tokens.length === 0) return undefined;
+  if (tokens.every((token) => affirmative.has(token))) return true;
+  if (tokens.every((token) => negative.has(token))) return false;
+  return undefined;
+}
+
+export function isValidFacebookPhone(message: string) {
+  const phone = message.trim();
+  const digits = phone.replace(/\D/g, '');
+  return (
+    digits.length >= 8 && digits.length <= 15 && /^\+?[\d\s().-]+$/.test(phone)
+  );
 }
 
 function quantityAt(tokens: string[], index: number) {
@@ -66,9 +202,7 @@ function parseQuantity(tokens: string[], match: KeywordMatch) {
   const afterQuantity = quantityAt(tokens, afterIndex);
 
   if (beforeQuantity !== undefined && afterQuantity !== undefined) {
-    return beforeQuantity === afterQuantity
-      ? beforeQuantity
-      : Number.NaN;
+    return beforeQuantity === afterQuantity ? beforeQuantity : Number.NaN;
   }
   return beforeQuantity ?? afterQuantity ?? 1;
 }
@@ -134,7 +268,9 @@ export function matchFacebookProductMessage(
     const mostSpecific = group.filter(
       (candidate) => candidate.phraseLength === longest,
     );
-    const productIds = new Set(mostSpecific.map((candidate) => candidate.product.id));
+    const productIds = new Set(
+      mostSpecific.map((candidate) => candidate.product.id),
+    );
     if (productIds.size > 1) return { kind: 'ambiguous' };
 
     const match = mostSpecific[0];

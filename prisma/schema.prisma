@@ -123,13 +123,15 @@ model FacebookWebhookEvent {
 }
 
 model FacebookPendingOrder {
-  id        String   @id
-  senderId  String   @unique
-  productId String
-  quantity  Int
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id              String   @id
+  senderId        String   @unique
+  productId       String
+  quantity        Int?
+  customerPhone   String?
+  deliveryAddress String?
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model FacebookPageSettings {

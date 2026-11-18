@@ -16,9 +16,11 @@ describe('FacebookGraphService', () => {
     process.env.FACEBOOK_PAGE_ACCESS_TOKEN = 'page-token';
     process.env.FACEBOOK_APP_SECRET = 'app-secret';
     process.env.FACEBOOK_GRAPH_API_VERSION = 'v99.0';
-    fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ id: 'published-1' }), { status: 200 }),
-    );
+    fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ id: 'published-1' }), { status: 200 }),
+      );
     vi.stubGlobal('fetch', fetchMock);
     service = new FacebookGraphService();
   });
@@ -48,9 +50,9 @@ describe('FacebookGraphService', () => {
   });
 
   it('publishes a text-only post using the Page feed endpoint', async () => {
-    await expect(
-      service.publishPagePost('Nouvelle collection'),
-    ).resolves.toBe('published-1');
+    await expect(service.publishPagePost('Nouvelle collection')).resolves.toBe(
+      'published-1',
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://graph.facebook.com/v99.0/page-1/feed',
@@ -92,7 +94,15 @@ describe('FacebookGraphService', () => {
   it('rejects a failed Facebook post deletion', async () => {
     fetchMock.mockResolvedValue(
       new Response(
-        JSON.stringify({ error: { message: 'Permission denied' } }),
+        JSON.stringify({
+          error: {
+            message: 'Permission denied',
+            type: 'OAuthException',
+            code: 200,
+            error_subcode: 123,
+            fbtrace_id: 'trace-1',
+          },
+        }),
         { status: 403 },
       ),
     );
@@ -123,7 +133,9 @@ describe('FacebookGraphService', () => {
     );
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
     if (!(request?.body instanceof FormData)) {
-      throw new Error('Expected the photo request body to be multipart form data');
+      throw new Error(
+        'Expected the photo request body to be multipart form data',
+      );
     }
     expect(request.body.get('appsecret_proof')).toBe(
       createHmac('sha256', 'app-secret').update('page-token').digest('hex'),

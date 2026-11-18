@@ -18,6 +18,7 @@ export interface FacebookOrderEventInput {
   channel: 'comment' | 'messenger';
   eventId: string;
   senderId: string;
+  customerName?: string;
   customerPhone: string;
   deliveryAddress: string;
   items: Array<{
@@ -215,6 +216,9 @@ export class OrdersService {
             data: {
               id: randomUUID(),
               status: 'reserved',
+              ...(input.customerName
+                ? { customerName: input.customerName.trim() }
+                : {}),
               customerPhone: input.customerPhone.trim(),
               deliveryAddress: input.deliveryAddress.trim(),
               facebookUserId: input.senderId,
@@ -280,9 +284,11 @@ export class OrdersService {
     senderId: string,
     productId: string,
     quantity: number | null,
+    customerName?: string,
   ) {
     if (quantity !== null) this.validateQuantity(quantity, true);
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const normalizedCustomerName = customerName?.trim() || null;
     return this.prisma.facebookPendingOrder.upsert({
       where: { senderId },
       create: {
@@ -290,9 +296,17 @@ export class OrdersService {
         senderId,
         productId,
         quantity,
+        customerName: normalizedCustomerName,
         expiresAt,
       },
-      update: { productId, quantity, expiresAt },
+      update: {
+        productId,
+        quantity,
+        ...(normalizedCustomerName
+          ? { customerName: normalizedCustomerName }
+          : {}),
+        expiresAt,
+      },
     });
   }
 
@@ -300,6 +314,7 @@ export class OrdersService {
     senderId: string,
     data: {
       quantity?: number;
+      customerName?: string;
       customerPhone?: string;
       deliveryAddress?: string;
     },

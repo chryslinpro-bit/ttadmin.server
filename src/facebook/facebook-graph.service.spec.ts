@@ -73,8 +73,48 @@ describe('FacebookGraphService', () => {
     );
   });
 
+  it('sends a private reply to a comment', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await expect(
+      service.sendCommentPrivateReply('comment-1', 'Bonjour'),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://graph.facebook.com/v99.0/comment-1/private_replies',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(URLSearchParams),
+      }),
+    );
+  });
+
   it('builds a Messenger link from the configured Page ID', () => {
     expect(service.getMessengerLink()).toBe('https://m.me/page-1');
+  });
+
+  it('retrieves a Messenger customer name using their Page-scoped ID', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ first_name: 'Aina', last_name: 'Rakoto' }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(service.getMessengerProfileName('customer-1')).resolves.toBe(
+      'Aina Rakoto',
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'https://graph.facebook.com/v99.0/customer-1?fields=first_name%2Clast_name',
+      ),
+      expect.objectContaining({ method: 'GET' }),
+    );
+    const requestUrl = fetchMock.mock.calls[0]?.[0];
+    expect(String(requestUrl)).toContain('access_token=page-token');
+    expect(String(requestUrl)).toContain('appsecret_proof=');
   });
 
   it('deletes a Page post using the Page token and appsecret proof', async () => {

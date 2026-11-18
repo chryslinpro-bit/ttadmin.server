@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -29,6 +30,7 @@ interface IncomingFacebookEvent {
   channel: FacebookChannel;
   eventId: string;
   senderId: string;
+  customerName?: string;
   text: string;
   commentId?: string;
 }
@@ -55,6 +57,8 @@ function getEntries(value: unknown) {
 
 @Injectable()
 export class FacebookService {
+  private readonly logger = new Logger(FacebookService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly ordersService: OrdersService,
@@ -279,6 +283,9 @@ export class FacebookService {
           channel: 'comment',
           eventId: commentId,
           senderId,
+          ...(isRecord(value.from) && getString(value.from, 'name')
+            ? { customerName: getString(value.from, 'name') }
+            : {}),
           text,
           commentId,
         });
@@ -318,7 +325,18 @@ export class FacebookService {
       event.senderId,
     );
     if (pending) {
-      await this.processPendingOrder(event, pending, products);
+      let customerName = pending.customerName;
+      if (event.customerName && !pending.customerName) {
+        await this.ordersService.updatePendingFacebookOrder(event.senderId, {
+          customerName: event.customerName,
+        });
+        customerName = event.customerName;
+      }
+      await this.processPendingOrder(
+        event,
+        { ...pending, customerName },
+        products,
+      );
       return;
     }
 
@@ -344,11 +362,20 @@ export class FacebookService {
         replyText,
       });
       if (available > 0 && !result.replySent) {
-        await this.ordersService.savePendingFacebookOrder(
-          event.senderId,
-          product.id,
-          null,
-        );
+        if (event.customerName) {
+          await this.ordersService.savePendingFacebookOrder(
+            event.senderId,
+            product.id,
+            null,
+            event.customerName,
+          );
+        } else {
+          await this.ordersService.savePendingFacebookOrder(
+            event.senderId,
+            product.id,
+            null,
+          );
+        }
       }
       if (result.replyText && !result.replySent) {
         await this.sendReply(event, result.replyText);
@@ -405,11 +432,20 @@ export class FacebookService {
       const quantity = hasExplicitFacebookQuantity(event.text, product)
         ? item.quantity
         : null;
-      await this.ordersService.savePendingFacebookOrder(
-        event.senderId,
-        product.id,
-        quantity,
-      );
+      if (event.customerName) {
+        await this.ordersService.savePendingFacebookOrder(
+          event.senderId,
+          product.id,
+          quantity,
+          event.customerName,
+        );
+      } else {
+        await this.ordersService.savePendingFacebookOrder(
+          event.senderId,
+          product.id,
+          quantity,
+        );
+      }
       await this.sendWorkflowReply(
         event,
         'order-details',
@@ -432,6 +468,7 @@ export class FacebookService {
     pending: {
       productId: string;
       quantity: number | null;
+      customerName?: string | null;
       customerPhone: string | null;
       deliveryAddress: string | null;
     },
@@ -539,10 +576,17 @@ export class FacebookService {
       return;
     }
 
+    const customerName =
+      pending.customerName ??
+      event.customerName ??
+      (event.channel === 'messenger'
+        ? await this.getMessengerCustomerName(event.senderId)
+        : null);
     const result = await this.ordersService.createFacebookReservation({
       channel: event.channel,
       eventId: event.eventId,
       senderId: event.senderId,
+      ...(customerName ? { customerName } : {}),
       customerPhone: pending.customerPhone,
       deliveryAddress: pending.deliveryAddress,
       items: [{ productId: pending.productId, quantity: pending.quantity }],
@@ -581,9 +625,31 @@ export class FacebookService {
 
   private async sendReply(event: IncomingFacebookEvent, replyText: string) {
     if (event.channel === 'comment' && event.commentId) {
-      await this.graph.sendCommentPrivateReply(event.commentId, replyText);
-    } else {
-      await this.graph.sendMessengerReply(event.senderId, replyText);
+      try {
+        await this.graph.sendCommentPrivateReply(event.commentId, replyText);
+        return;
+      } catch (error) {
+        this.logger.warn(
+          `Private reply failed for comment ${event.commentId}; trying the Messenger fallback: ${
+            error instanceof Error ? error.message : 'Unknown Graph API error'
+          }`,
+        );
+      }
+    }
+
+    await this.graph.sendMessengerReply(event.senderId, replyText);
+  }
+
+  private async getMessengerCustomerName(senderId: string) {
+    try {
+      return await this.graph.getMessengerProfileName(senderId);
+    } catch (error) {
+      this.logger.warn(
+        `Could not retrieve a Messenger customer name; continuing without it: ${
+          error instanceof Error ? error.message : 'Unknown Graph API error'
+        }`,
+      );
+      return null;
     }
   }
 }

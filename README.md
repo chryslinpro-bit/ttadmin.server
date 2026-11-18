@@ -97,6 +97,25 @@ Les publications organiques peuvent inclure un lien `m.me` vers la conversation
 Messenger de la Page. Elles ne prennent pas en charge le bouton natif
 « Envoyer un message » via l’API utilisée.
 
+Lorsqu’une commande Facebook est confirmée, le nom fourni avec un commentaire
+est enregistré directement. Pour une commande passée dans Messenger, le serveur
+tente de récupérer le nom du profil à partir de l’identifiant de conversation
+Page-scoped, avec `pages_messaging`. Cette information dépend de l’accès au
+profil accordé à l’application par Meta ; si elle n’est pas disponible, la
+commande reste enregistrée avec les autres coordonnées fournies par le client.
+
+Pour un commentaire, le serveur utilise d’abord la réponse privée
+`/{comment-id}/private_replies`. Si Meta refuse cette réponse, il tente ensuite
+un DM Messenger vers l’identifiant du commentateur. La souscription webhook doit
+inclure `feed` avec `comment` et les autorisations Page nécessaires doivent être
+accordées et approuvées. Après une modification des permissions, un nouveau jeton
+d’accès Page est nécessaire.
+
+Le message automatique par défaut accueille le client et lui demande quel
+produit il souhaite commander. La migration met à jour ce message seulement
+s’il correspond encore à l’ancien texte par défaut ; un message personnalisé
+dans les réglages Facebook est conservé.
+
 ## Vérification
 
 ```bash

@@ -46,6 +46,27 @@ export class FacebookGraphService {
     });
   }
 
+  async getMessengerProfileName(psid: string): Promise<string | null> {
+    if (!psid.trim()) return null;
+    const config = this.getConfig();
+    const params = new URLSearchParams({
+      fields: 'first_name,last_name',
+      access_token: config.pageAccessToken,
+      appsecret_proof: this.getAppsecretProof(config),
+    });
+    const response = await this.request(
+      `${encodeURIComponent(psid)}?${params.toString()}`,
+      config,
+      { method: 'GET' },
+    );
+    if (!isRecord(response)) return null;
+    const firstName =
+      typeof response.first_name === 'string' ? response.first_name.trim() : '';
+    const lastName =
+      typeof response.last_name === 'string' ? response.last_name.trim() : '';
+    return [firstName, lastName].filter(Boolean).join(' ') || null;
+  }
+
   async deletePagePost(postId: string) {
     if (!postId.trim()) {
       throw new BadRequestException('Facebook post ID is required');

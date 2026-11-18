@@ -127,6 +127,7 @@ model FacebookPendingOrder {
   senderId        String   @unique
   productId       String
   quantity        Int?
+  customerName    String?
   customerPhone   String?
   deliveryAddress String?
   expiresAt       DateTime
@@ -136,7 +137,7 @@ model FacebookPendingOrder {
 
 model FacebookPageSettings {
   id              String   @id
-  greetingMessage String   @default("Bonjour, merci de nous avoir contactés. Nous revenons vers vous rapidement.")
+  greetingMessage String   @default("Bonjour ! Merci de nous avoir contactés. Nous serons ravis de vous aider. Quel produit souhaitez-vous commander ? Indiquez-nous son nom ou envoyez-nous une photo, et nous vous guiderons pour la suite.")
   updatedAt       DateTime @updatedAt
 }
 

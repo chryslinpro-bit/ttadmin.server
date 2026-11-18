@@ -28,6 +28,7 @@ describe('FacebookService', () => {
   const graph = {
     ensureConfigured: vi.fn(),
     getMessengerLink: vi.fn(),
+    getMessengerProfileName: vi.fn(),
     publishPagePost: vi.fn(),
     sendCommentPrivateReply: vi.fn(),
     sendMessengerReply: vi.fn(),
@@ -38,6 +39,7 @@ describe('FacebookService', () => {
     vi.clearAllMocks();
     process.env.FACEBOOK_PAGE_ID = 'page-1';
     graph.getMessengerLink.mockReturnValue('https://m.me/page-1');
+    graph.getMessengerProfileName.mockResolvedValue(null);
     graph.publishPagePost.mockResolvedValue('published-1');
     prisma.product.findMany.mockResolvedValue([
       {
@@ -58,7 +60,8 @@ describe('FacebookService', () => {
       },
     ]);
     prisma.facebookPageSettings.upsert.mockResolvedValue({
-      greetingMessage: 'Bonjour, nous revenons vers vous rapidement.',
+      greetingMessage:
+        'Bonjour ! Merci de nous avoir contactés. Nous serons ravis de vous aider. Quel produit souhaitez-vous commander ? Indiquez-nous son nom ou envoyez-nous une photo, et nous vous guiderons pour la suite.',
       updatedAt: new Date(),
     });
     ordersService.createFacebookReservation.mockResolvedValue({
@@ -119,7 +122,7 @@ describe('FacebookService', () => {
                 item: 'comment',
                 verb: 'add',
                 comment_id: 'comment-1',
-                from: { id: 'customer-1' },
+                from: { id: 'customer-1', name: 'Aina Rakoto' },
                 message: 'Robe bleue 2',
               },
             },
@@ -133,6 +136,7 @@ describe('FacebookService', () => {
       'customer-1',
       'product-1',
       2,
+      'Aina Rakoto',
     );
     expect(graph.sendCommentPrivateReply).toHaveBeenCalledWith(
       'comment-1',
@@ -145,11 +149,13 @@ describe('FacebookService', () => {
     );
   });
 
-  it('sends the configured welcome message for unrecognized Messenger messages', async () => {
+  it('asks which product the customer wants to order for unrecognized Messenger messages', async () => {
+    const greeting =
+      'Bonjour ! Merci de nous avoir contactés. Nous serons ravis de vous aider. Quel produit souhaitez-vous commander ? Indiquez-nous son nom ou envoyez-nous une photo, et nous vous guiderons pour la suite.';
     ordersService.recordFacebookOutcome.mockResolvedValue({
       status: 'greeting',
       orderId: null,
-      replyText: 'Bonjour, nous revenons vers vous rapidement.',
+      replyText: greeting,
       replySent: false,
       duplicate: false,
     });
@@ -174,23 +180,26 @@ describe('FacebookService', () => {
       eventId: 'message-welcome',
       senderId: 'customer-1',
       status: 'greeting',
-      replyText: 'Bonjour, nous revenons vers vous rapidement.',
+      replyText: greeting,
     });
     expect(graph.sendMessengerReply).toHaveBeenCalledWith(
       'customer-1',
-      'Bonjour, nous revenons vers vous rapidement.',
+      greeting,
     );
+    expect(greeting).toContain('Quel produit souhaitez-vous commander ?');
     expect(ordersService.markFacebookReplySent).toHaveBeenCalledWith(
       'messenger',
       'message-welcome',
     );
   });
 
-  it('sends the configured welcome message privately for unrelated comments', async () => {
+  it('asks which product the customer wants to order in a private comment reply', async () => {
+    const greeting =
+      'Bonjour ! Merci de nous avoir contactés. Nous serons ravis de vous aider. Quel produit souhaitez-vous commander ? Indiquez-nous son nom ou envoyez-nous une photo, et nous vous guiderons pour la suite.';
     ordersService.recordFacebookOutcome.mockResolvedValue({
       status: 'greeting',
       orderId: null,
-      replyText: 'Bonjour, nous revenons vers vous rapidement.',
+      replyText: greeting,
       replySent: false,
       duplicate: false,
     });
@@ -217,7 +226,56 @@ describe('FacebookService', () => {
 
     expect(graph.sendCommentPrivateReply).toHaveBeenCalledWith(
       'comment-welcome',
-      'Bonjour, nous revenons vers vous rapidement.',
+      greeting,
+    );
+    expect(greeting).toContain('Quel produit souhaitez-vous commander ?');
+  });
+
+  it('uses Messenger when a comment private reply is refused', async () => {
+    graph.sendCommentPrivateReply.mockRejectedValueOnce(
+      new Error('Private replies are unavailable'),
+    );
+    ordersService.recordFacebookOutcome.mockResolvedValue({
+      status: 'greeting',
+      orderId: null,
+      replyText:
+        'Bonjour ! Merci de nous avoir contactés. Nous serons ravis de vous aider. Quel produit souhaitez-vous commander ? Indiquez-nous son nom ou envoyez-nous une photo, et nous vous guiderons pour la suite.',
+      replySent: false,
+      duplicate: false,
+    });
+
+    await service.handleWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          changes: [
+            {
+              field: 'feed',
+              value: {
+                item: 'comment',
+                verb: 'add',
+                comment_id: 'comment-fallback',
+                from: { id: 'customer-1' },
+                message: 'Avez-vous une boutique ?',
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(graph.sendCommentPrivateReply).toHaveBeenCalledWith(
+      'comment-fallback',
+      expect.stringContaining('Quel produit souhaitez-vous commander ?'),
+    );
+    expect(graph.sendMessengerReply).toHaveBeenCalledWith(
+      'customer-1',
+      expect.stringContaining('Quel produit souhaitez-vous commander ?'),
+    );
+    expect(ordersService.markFacebookReplySent).toHaveBeenCalledWith(
+      'comment',
+      'comment-fallback',
     );
   });
 
@@ -306,6 +364,7 @@ describe('FacebookService', () => {
   });
 
   it('creates an order only after contact details are reviewed and confirmed', async () => {
+    graph.getMessengerProfileName.mockResolvedValue('Aina Rakoto');
     ordersService.getPendingFacebookOrder
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
@@ -323,6 +382,7 @@ describe('FacebookService', () => {
       .mockResolvedValueOnce({
         productId: 'product-1',
         quantity: 2,
+        customerName: null,
         customerPhone: '+261 34 12 345 67',
         deliveryAddress: 'Lot II A 25, Analamahitsy, Antananarivo',
       });
@@ -381,9 +441,49 @@ describe('FacebookService', () => {
       channel: 'messenger',
       eventId: 'confirm',
       senderId: 'customer-1',
+      customerName: 'Aina Rakoto',
       customerPhone: '+261 34 12 345 67',
       deliveryAddress: 'Lot II A 25, Analamahitsy, Antananarivo',
       items: [{ productId: 'product-1', quantity: 2 }],
+    });
+    expect(graph.getMessengerProfileName).toHaveBeenCalledWith('customer-1');
+  });
+
+  it('still confirms a Messenger order when the profile name is unavailable', async () => {
+    ordersService.getPendingFacebookOrder.mockResolvedValue({
+      productId: 'product-1',
+      quantity: 1,
+      customerName: null,
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
+    });
+    graph.getMessengerProfileName.mockRejectedValue(
+      new Error('Profile access is unavailable'),
+    );
+
+    await service.handleWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              message: { mid: 'confirm-without-profile', text: 'CONFIRMER' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(ordersService.createFacebookReservation).toHaveBeenCalledWith({
+      channel: 'messenger',
+      eventId: 'confirm-without-profile',
+      senderId: 'customer-1',
+      customerPhone: '+261 34 12 345 67',
+      deliveryAddress: 'Lot II A 25, Analamahitsy',
+      items: [{ productId: 'product-1', quantity: 1 }],
     });
   });
 

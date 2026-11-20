@@ -311,50 +311,6 @@ describe('OrdersService', () => {
     );
   });
 
-  it('records a delivery timestamp and updates customer details', async () => {
-    transaction.order.findFirst.mockResolvedValue({
-      id: 'order-1',
-      status: 'payed',
-      deliveredAt: null,
-      items: [{ productId: 'product-1', quantity: 1 }],
-    });
-    transaction.order.update.mockImplementation(({ data }) =>
-      Promise.resolve({ id: 'order-1', ...data }),
-    );
-
-    await service.update('order-1', {
-      delivered: true,
-      customer_name: 'Aina Rakoto',
-      customer_phone: '+261 34 00',
-      delivery_address: 'Analamahitsy',
-    });
-
-    expect(transaction.order.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          deliveredAt: expect.any(Date),
-          customerName: 'Aina Rakoto',
-          customerPhone: '+261 34 00',
-          deliveryAddress: 'Analamahitsy',
-        }),
-      }),
-    );
-  });
-
-  it('does not mark a canceled order as delivered', async () => {
-    transaction.order.findFirst.mockResolvedValue({
-      id: 'order-1',
-      status: 'canceled',
-      deliveredAt: null,
-      items: [{ productId: 'product-1', quantity: 1 }],
-    });
-
-    await expect(
-      service.update('order-1', { delivered: true }),
-    ).rejects.toThrow('A canceled order cannot be marked delivered');
-    expect(transaction.order.update).not.toHaveBeenCalled();
-  });
-
   it('reduces a legacy multi-product order to one product when it is edited', async () => {
     transaction.order.findFirst.mockResolvedValue({
       id: 'legacy-order',

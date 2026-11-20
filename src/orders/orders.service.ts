@@ -60,7 +60,6 @@ export class OrdersService {
   async create(createOrderDto: CreateOrderDto) {
     this.validateStatus(createOrderDto.status);
     this.validateCustomerDetails(createOrderDto);
-    this.validateDelivered(createOrderDto.delivered);
     const items = this.resolveItems(
       createOrderDto.items,
       createOrderDto.product_id,
@@ -69,11 +68,6 @@ export class OrdersService {
     );
 
     const status = createOrderDto.status ?? 'reserved';
-    if (createOrderDto.delivered && status === 'canceled') {
-      throw new BadRequestException(
-        'A canceled order cannot be marked delivered',
-      );
-    }
     return this.prisma.$transaction(
       async (tx) => {
         for (const item of items) {
@@ -117,7 +111,6 @@ export class OrdersService {
                   ),
                 }
               : {}),
-            ...(createOrderDto.delivered ? { deliveredAt: new Date() } : {}),
             items: {
               create: items.map((item) => ({
                 id: randomUUID(),
@@ -405,7 +398,6 @@ export class OrdersService {
   update(id: string, updateOrderDto: UpdateOrderDto) {
     this.validateStatus(updateOrderDto.status);
     this.validateCustomerDetails(updateOrderDto);
-    this.validateDelivered(updateOrderDto.delivered);
     if (
       updateOrderDto.product_id !== undefined &&
       (typeof updateOrderDto.product_id !== 'string' ||
@@ -458,11 +450,6 @@ export class OrdersService {
                   quantity: item.quantity,
                 }));
         const nextStatus = updateOrderDto.status ?? currentOrder.status;
-        if (updateOrderDto.delivered === true && nextStatus === 'canceled') {
-          throw new BadRequestException(
-            'A canceled order cannot be marked delivered',
-          );
-        }
         const wasActive = currentOrder.status !== 'canceled';
         const willBeActive = nextStatus !== 'canceled';
 
@@ -568,13 +555,6 @@ export class OrdersService {
                   customerPhone: this.normalizeCustomerValue(
                     updateOrderDto.customer_phone,
                   ),
-                }),
-            ...(updateOrderDto.delivered === undefined
-              ? {}
-              : {
-                  deliveredAt: updateOrderDto.delivered
-                    ? (currentOrder.deliveredAt ?? new Date())
-                    : null,
                 }),
           },
           include: {
@@ -925,12 +905,6 @@ export class OrdersService {
           `${field} must be text with at most ${maxLength} characters`,
         );
       }
-    }
-  }
-
-  private validateDelivered(delivered: boolean | undefined) {
-    if (delivered !== undefined && typeof delivered !== 'boolean') {
-      throw new BadRequestException('delivered must be a boolean');
     }
   }
 

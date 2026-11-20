@@ -13,5 +13,4 @@ export class CreateOrderDto {
   customer_name?: string | null;
   delivery_address?: string | null;
   customer_phone?: string | null;
-  delivered?: boolean;
 }

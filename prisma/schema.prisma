@@ -82,7 +82,6 @@ model Order {
   customerName    String?     @map("customer_name")
   deliveryAddress String?     @map("delivery_address")
   customerPhone   String?     @map("customer_phone")
-  deliveredAt     DateTime?   @map("delivered_at")
   legacyProductId String?     @map("produit_id")
   legacyQuantity  Int?        @map("quantity")
   status          Status      @default(reserved)
